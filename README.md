@@ -4,7 +4,11 @@
 
 ## Group Members
 
-*(add names here)*
+#Nour Romdhane
+#Philine de Graaf
+#Marian Garabana
+#Emily (Em) Echeverria
+#Nuria Díaz Jiménez
 
 ## Schema
 
