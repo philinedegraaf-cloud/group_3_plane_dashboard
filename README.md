@@ -4,11 +4,11 @@
 
 ## Group Members
 
-#Nour Romdhane
-#Philine de Graaf
-#Marian Garabana
-#Emily (Em) Echeverria
-#Nuria Díaz Jiménez
+- Nour Romdhane
+- Philine de Graaf
+- Marian Garabana
+- Emily (Em) Echeverria
+- Nuria Díaz Jiménez
 
 ## Schema
 
