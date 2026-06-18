@@ -4,7 +4,7 @@ db.py — DB2 connection, helper functions, and data extraction.
 Workflow: run this file directly (python db.py) to pull all three
 pre-aggregated datasets from the DB and save them as Parquet files
 under data/. The Streamlit app then reads those files — no live DB
-connection at dashboard runtime.
+connection at dashboauv syncrd runtime.
 """
 
 import os
