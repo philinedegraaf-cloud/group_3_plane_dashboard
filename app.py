@@ -4,6 +4,9 @@ app.py — IE Airlines Group 3 Streamlit Dashboard
 
 Run: streamlit run app.py
 Data must be pre-generated first: python db.py
+
+Navigation: session-state driven single-file multi-page app.
+  st.session_state["page"] = "home" | "q1" | "q2" | "q3" | "q4"
 """
 
 from pathlib import Path
@@ -24,7 +27,7 @@ from analysis import (
     tax_drain_by_route,
 )
 
-# ── page config ──────────────────────────────────────────────────────────────
+# ── page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
     page_title="IE Airlines — Real P&L",
@@ -34,134 +37,193 @@ st.set_page_config(
 
 DATA_DIR = Path(__file__).parent / "data"
 
+# ── question catalogue (single source of truth for cards + routing) ───────────
 
-# ── data loading (cached so Streamlit doesn't re-read on every interaction) ──
+QUESTIONS = {
+    "q1": {
+        "emoji": "📍",
+        "title": "Route Profitability",
+        "question": "Which routes earn the most after subtracting fuel costs?",
+        "teaser": (
+            "Revenue looks healthy everywhere — but fuel is the largest controllable "
+            "cost. See which routes are truly profitable and which burn more than they earn."
+        ),
+    },
+    "q2": {
+        "emoji": "🏛️",
+        "title": "Tax Drain",
+        "question": "Where does airport tax eat the most margin?",
+        "teaser": (
+            "Airport taxes absorb ~16 % of gross revenue on average, but the burden "
+            "is not spread evenly. Identify the routes with least pricing headroom."
+        ),
+    },
+    "q3": {
+        "emoji": "⚙️",
+        "title": "Fleet Efficiency",
+        "question": "Which aircraft model generates the most revenue per gallon?",
+        "teaser": (
+            "Revenue per gallon combines physical efficiency with route yield. "
+            "Low-scoring models are candidates for redeployment or phase-out."
+        ),
+    },
+    "q4": {
+        "emoji": "📈",
+        "title": "Margin Trend",
+        "question": "Is the overall margin improving over time?",
+        "teaser": (
+            "A single margin snapshot can be misleading. Track the revenue-vs-fuel gap "
+            "year by year to see whether the business is getting stronger or weaker."
+        ),
+    },
+}
+
+# ── data loading (cached) ─────────────────────────────────────────────────────
 
 @st.cache_data
 def load_revenue() -> pl.DataFrame:
     return pl.read_parquet(DATA_DIR / "revenue.parquet")
 
-
 @st.cache_data
 def load_fuel() -> pl.DataFrame:
     return pl.read_parquet(DATA_DIR / "fuel.parquet")
-
 
 @st.cache_data
 def load_airports() -> pl.DataFrame:
     return pl.read_parquet(DATA_DIR / "airports.parquet")
 
-
-# ── load and enrich ──────────────────────────────────────────────────────────
-
 revenue_raw = load_revenue()
-fuel = load_fuel()
-airports = load_airports()
-
-# Join continent / city onto revenue rows once; filters operate on this df
+fuel        = load_fuel()
+airports    = load_airports()
 revenue_enriched = enrich_revenue_with_airports(revenue_raw, airports)
 
-# ── sidebar filters ──────────────────────────────────────────────────────────
+# ── routing helpers ───────────────────────────────────────────────────────────
 
-st.sidebar.title("Filters")
+def go_to(page: str) -> None:
+    st.session_state["page"] = page
+    st.rerun()
 
-yr_min = int(revenue_enriched["yr"].min())
-yr_max = int(revenue_enriched["yr"].max())
-year_range = st.sidebar.slider(
-    "Year range",
-    min_value=yr_min,
-    max_value=yr_max,
-    value=(yr_min, yr_max),
-)
+if "page" not in st.session_state:
+    st.session_state["page"] = "home"
 
-class_options = {"All": [], "Business (B)": ["B"], "Premium (P)": ["P"], "Economy (E)": ["E"]}
-class_choice = st.sidebar.selectbox("Cabin class", list(class_options.keys()))
-cabin_classes = class_options[class_choice]
+current_page = st.session_state["page"]
 
-continent_list = sorted(
-    revenue_enriched["origin_continent"].drop_nulls().unique().to_list()
-)
-origin_continents = st.sidebar.multiselect(
-    "Origin continent",
-    continent_list,
-    default=[],
-    placeholder="All continents",
-)
+# ── shared sidebar (only shown on analysis pages) ─────────────────────────────
 
-min_tickets = st.sidebar.slider(
-    "Min ticket volume per route",
-    min_value=0,
-    max_value=500_000,
-    value=0,
-    step=10_000,
-    help="Remove low-volume routes that can skew the profitability scatter.",
-)
+def render_sidebar() -> tuple:
+    """Render sidebar filters and return (revenue_filtered, kpis)."""
+    st.sidebar.title("Filters")
 
-st.sidebar.markdown("---")
-st.sidebar.caption(
-    f"Fuel price assumption: **${FUEL_PRICE_USD}/gallon** (fixed).\n\n"
-    "Taxes treated as pass-through — excluded from net revenue."
-)
+    yr_min = int(revenue_enriched["yr"].min())
+    yr_max = int(revenue_enriched["yr"].max())
+    year_range = st.sidebar.slider("Year range", yr_min, yr_max, (yr_min, yr_max))
 
-# ── apply filters ────────────────────────────────────────────────────────────
+    class_options = {
+        "All": [], "Business (B)": ["B"], "Premium (P)": ["P"], "Economy (E)": ["E"],
+    }
+    cabin_classes = class_options[st.sidebar.selectbox("Cabin class", list(class_options))]
 
-revenue_filtered = apply_filters(
-    revenue_enriched,
-    year_min=year_range[0],
-    year_max=year_range[1],
-    cabin_classes=cabin_classes,
-    origin_continents=origin_continents,
-    min_tickets=min_tickets,
-)
+    continent_list = sorted(
+        revenue_enriched["origin_continent"].drop_nulls().unique().to_list()
+    )
+    origin_continents = st.sidebar.multiselect(
+        "Origin continent", continent_list, default=[], placeholder="All continents",
+    )
 
-# ── header ───────────────────────────────────────────────────────────────────
+    min_tickets = st.sidebar.slider(
+        "Min ticket volume per route", 0, 500_000, 0, step=10_000,
+        help="Remove low-volume routes that can skew the profitability scatter.",
+    )
 
-st.title("✈ IE Airlines — The Real P&L")
-st.caption(
-    "Everyone shows revenue. We show what's left after costs.  "
-    "Net revenue = ticket price excluding taxes. "
-    "Fuel cost estimated at $3/gallon."
-)
+    st.sidebar.markdown("---")
+    st.sidebar.caption(
+        f"Fuel price assumption: **${FUEL_PRICE_USD}/gallon** (fixed).\n\n"
+        "Taxes treated as pass-through — excluded from net revenue."
+    )
 
-# ── KPI cards ────────────────────────────────────────────────────────────────
+    if st.sidebar.button("← Back to home"):
+        go_to("home")
 
-kpis = compute_kpis(revenue_filtered, fuel)
+    rev_filtered = apply_filters(
+        revenue_enriched,
+        year_min=year_range[0],
+        year_max=year_range[1],
+        cabin_classes=cabin_classes,
+        origin_continents=origin_continents,
+        min_tickets=min_tickets,
+    )
+    kpis = compute_kpis(rev_filtered, fuel)
+    return rev_filtered, kpis
 
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("Net Revenue", f"${kpis['total_net_revenue'] / 1e9:.2f}B")
-c2.metric("Est. Fuel Cost", f"${kpis['total_fuel_cost'] / 1e9:.2f}B")
-c3.metric("Est. Margin", f"{kpis['margin_pct']:.1f}%")
-c4.metric("Avg Tax Burden", f"{kpis['tax_burden_pct']:.1f}%")
-c5.metric("Best Route", kpis["best_route"])
-c6.metric("Worst Route", kpis["worst_route"])
 
-st.markdown("---")
+def render_kpi_strip(kpis: dict) -> None:
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Net Revenue",   f"${kpis['total_net_revenue'] / 1e9:.2f}B")
+    c2.metric("Est. Fuel Cost", f"${kpis['total_fuel_cost']  / 1e9:.2f}B")
+    c3.metric("Est. Margin",   f"{kpis['margin_pct']:.1f}%")
+    c4.metric("Avg Tax Burden", f"{kpis['tax_burden_pct']:.1f}%")
+    c5.metric("Best Route",    kpis["best_route"])
+    c6.metric("Worst Route",   kpis["worst_route"])
 
-# ── Question-based tabs ───────────────────────────────────────────────────────
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "Q1 · Which routes earn most after fuel?",
-    "Q2 · Where does tax eat the most margin?",
-    "Q3 · Which aircraft is most fuel-efficient?",
-    "Q4 · Is the margin improving over time?",
-    "Data",
-])
+# ═══════════════════════════════════════════════════════════════════════════════
+# HOME PAGE
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Q1: Route Profitability ───────────────────────────────────────────────────
+def render_home() -> None:
+    st.title("✈ IE Airlines — The Real P&L")
+    st.markdown(
+        "### Everyone shows revenue. We show what's left after costs.\n"
+        "Select a question below to explore the analysis."
+    )
+    st.markdown("---")
 
-with tab1:
-    st.subheader("Q1 · Which routes earn the most after subtracting fuel costs?")
+    # 2 × 2 grid of question cards
+    row1 = st.columns(2)
+    row2 = st.columns(2)
+    card_slots = [row1[0], row1[1], row2[0], row2[1]]
+
+    for slot, (key, q) in zip(card_slots, QUESTIONS.items()):
+        with slot:
+            with st.container(border=True):
+                st.markdown(f"## {q['emoji']}")
+                st.markdown(f"**{q['title']}**")
+                st.markdown(f"*{q['question']}*")
+                st.caption(q["teaser"])
+                st.button(
+                    "Explore →",
+                    key=f"btn_{key}",
+                    on_click=go_to,
+                    args=(key,),
+                    use_container_width=True,
+                    type="primary",
+                )
+
+    st.markdown("---")
+    st.caption(
+        f"Data: IE Airlines internal extract · Fuel assumption: ${FUEL_PRICE_USD}/gallon · "
+        "Taxes treated as pass-through."
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Q1 — ROUTE PROFITABILITY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def render_q1(revenue_filtered: pl.DataFrame, kpis: dict) -> None:
+    st.title(f"{QUESTIONS['q1']['emoji']} {QUESTIONS['q1']['title']}")
+    st.subheader(QUESTIONS["q1"]["question"])
+    render_kpi_strip(kpis)
+    st.markdown("---")
+
     st.markdown(
         """
-        **Why this matters:** Revenue figures look healthy across all routes, but fuel is the
-        largest controllable cost. A route can have high gross revenue and still destroy value
+        **Why this matters:** A route can have high gross revenue and still destroy value
         if it flies fuel-hungry aircraft over long distances with thin load factors.
 
-        **How to read this chart:** Each bubble is a route. The X-axis is estimated fuel cost;
-        the Y-axis is net revenue (ticket price minus airport taxes). Bubbles **above the dashed
-        line** earn more than they cost in fuel — they are profitable on a fuel basis. Bubbles
-        **below** are burning more fuel cost than they generate in net revenue.
-        Bubble size = total tickets sold.
+        **How to read this chart:** Each bubble is a route. X-axis = estimated fuel cost;
+        Y-axis = net revenue. Bubbles **above the dashed line** earn more than they cost in
+        fuel. Bubble size = total tickets sold.
         """
     )
 
@@ -169,80 +231,70 @@ with tab1:
 
     if scatter_df.is_empty():
         st.warning("No data for selected filters.")
-    else:
-        fig1 = px.scatter(
-            scatter_df.to_pandas(),
-            x="fuel_cost",
-            y="net_revenue",
-            size="ticket_count",
-            color="origin_continent",
-            hover_name="route_label",
-            hover_data={
-                "est_profit": ":,.0f",
-                "ticket_count": ":,",
-                "fuel_cost": ":,.0f",
-                "net_revenue": ":,.0f",
-            },
-            labels={
-                "fuel_cost": "Est. Fuel Cost ($)",
-                "net_revenue": "Net Revenue ($)",
-                "origin_continent": "Continent",
-                "ticket_count": "Tickets sold",
-            },
-            title="Net Revenue vs. Estimated Fuel Cost by Route",
-            size_max=60,
-        )
-        axis_max = max(scatter_df["fuel_cost"].max(), scatter_df["net_revenue"].max()) * 1.05
-        fig1.add_trace(
-            go.Scatter(
-                x=[0, axis_max],
-                y=[0, axis_max],
-                mode="lines",
-                line=dict(color="grey", dash="dash", width=1),
-                name="Break-even",
-                showlegend=True,
+        return
+
+    fig = px.scatter(
+        scatter_df.to_pandas(),
+        x="fuel_cost", y="net_revenue",
+        size="ticket_count", color="origin_continent",
+        hover_name="route_label",
+        hover_data={
+            "est_profit": ":,.0f", "ticket_count": ":,",
+            "fuel_cost": ":,.0f", "net_revenue": ":,.0f",
+        },
+        labels={
+            "fuel_cost": "Est. Fuel Cost ($)", "net_revenue": "Net Revenue ($)",
+            "origin_continent": "Continent", "ticket_count": "Tickets sold",
+        },
+        title="Net Revenue vs. Estimated Fuel Cost by Route",
+        size_max=60,
+    )
+    axis_max = max(scatter_df["fuel_cost"].max(), scatter_df["net_revenue"].max()) * 1.05
+    fig.add_trace(go.Scatter(
+        x=[0, axis_max], y=[0, axis_max],
+        mode="lines", line=dict(color="grey", dash="dash", width=1),
+        name="Break-even", showlegend=True,
+    ))
+    fig.update_layout(height=520)
+    st.plotly_chart(fig, use_container_width=True)
+
+    top3    = scatter_df.sort("est_profit", descending=True).head(3)
+    bottom3 = scatter_df.sort("est_profit", descending=False).head(3)
+
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.markdown("**Top 3 routes by estimated profit**")
+        for row in top3.iter_rows(named=True):
+            st.markdown(
+                f"- **{row['route_label']}** — "
+                f"${row['est_profit']:,.0f} profit ({row['ticket_count']:,} tickets)"
             )
-        )
-        fig1.update_layout(height=520)
-        st.plotly_chart(fig1, use_container_width=True)
+    with col_r:
+        st.markdown("**Bottom 3 routes by estimated profit**")
+        for row in bottom3.iter_rows(named=True):
+            st.markdown(
+                f"- **{row['route_label']}** — "
+                f"${row['est_profit']:,.0f} profit ({row['ticket_count']:,} tickets)"
+            )
 
-        # Key findings
-        top3 = scatter_df.sort("est_profit", descending=True).head(3)
-        bottom3 = scatter_df.sort("est_profit", descending=False).head(3)
 
-        col_l, col_r = st.columns(2)
-        with col_l:
-            st.markdown("**Top 3 routes by estimated profit**")
-            for row in top3.iter_rows(named=True):
-                st.markdown(
-                    f"- **{row['route_label']}** — "
-                    f"${row['est_profit']:,.0f} profit "
-                    f"({row['ticket_count']:,} tickets)"
-                )
-        with col_r:
-            st.markdown("**Bottom 3 routes by estimated profit**")
-            for row in bottom3.iter_rows(named=True):
-                st.markdown(
-                    f"- **{row['route_label']}** — "
-                    f"${row['est_profit']:,.0f} profit "
-                    f"({row['ticket_count']:,} tickets)"
-                )
+# ═══════════════════════════════════════════════════════════════════════════════
+# Q2 — TAX DRAIN
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Q2: Tax Drain ─────────────────────────────────────────────────────────────
+def render_q2(revenue_filtered: pl.DataFrame, kpis: dict) -> None:
+    st.title(f"{QUESTIONS['q2']['emoji']} {QUESTIONS['q2']['title']}")
+    st.subheader(QUESTIONS["q2"]["question"])
+    render_kpi_strip(kpis)
+    st.markdown("---")
 
-with tab2:
-    st.subheader("Q2 · Where does airport tax eat the most margin?")
     st.markdown(
         """
-        **Why this matters:** Airport taxes (departure, arrival, local) are passed through to the
-        passenger but erode gross revenue. Routes with a heavy tax burden have less pricing
-        headroom — raising fares risks demand destruction while taxes already absorb ~16% on
-        average. Knowing *which* routes carry the highest tax share lets the commercial team
-        apply targeted ancillary pricing or route renegotiations.
+        **Why this matters:** Airport taxes erode gross revenue and reduce pricing headroom.
+        Routes with a heavy tax burden are harder to reprice without demand destruction.
 
-        **How to read these charts:** The left bar ranks routes by tax as a percentage of gross
-        revenue. The right chart stacks net revenue and taxes for the top-volume routes so you
-        can see absolute magnitudes alongside percentages.
+        **How to read these charts:** Left = routes ranked by tax as % of gross revenue.
+        Right = absolute net revenue vs taxes stacked for the highest-volume routes.
         """
     )
 
@@ -251,70 +303,61 @@ with tab2:
     col_a, col_b = st.columns(2)
 
     with col_a:
-        top_tax = tax_df.head(20)
-        fig2a = px.bar(
-            top_tax.to_pandas(),
-            x="tax_pct",
-            y="route_label",
-            orientation="h",
+        fig_a = px.bar(
+            tax_df.head(20).to_pandas(),
+            x="tax_pct", y="route_label", orientation="h",
             title="Tax Burden % by Route (top 20 most taxed)",
             labels={"tax_pct": "Tax % of Gross Revenue", "route_label": "Route"},
-            color="tax_pct",
-            color_continuous_scale="Reds",
+            color="tax_pct", color_continuous_scale="Reds",
         )
-        fig2a.update_layout(height=520, yaxis={"categoryorder": "total ascending"})
-        st.plotly_chart(fig2a, use_container_width=True)
+        fig_a.update_layout(height=520, yaxis={"categoryorder": "total ascending"})
+        st.plotly_chart(fig_a, use_container_width=True)
 
     with col_b:
-        top_routes = tax_df.sort("gross_revenue", descending=True).head(15)
-        stacked_pd = top_routes.select(
-            "route_label", "net_revenue", "total_taxes"
-        ).to_pandas()
-
-        fig2b = go.Figure()
-        fig2b.add_trace(go.Bar(
-            x=stacked_pd["route_label"],
-            y=stacked_pd["net_revenue"],
-            name="Net Revenue",
-            marker_color="#1f77b4",
+        top_vol = tax_df.sort("gross_revenue", descending=True).head(15)
+        pd_stacked = top_vol.select("route_label", "net_revenue", "total_taxes").to_pandas()
+        fig_b = go.Figure()
+        fig_b.add_trace(go.Bar(
+            x=pd_stacked["route_label"], y=pd_stacked["net_revenue"],
+            name="Net Revenue", marker_color="#1f77b4",
         ))
-        fig2b.add_trace(go.Bar(
-            x=stacked_pd["route_label"],
-            y=stacked_pd["total_taxes"],
-            name="Taxes",
-            marker_color="#d62728",
+        fig_b.add_trace(go.Bar(
+            x=pd_stacked["route_label"], y=pd_stacked["total_taxes"],
+            name="Taxes", marker_color="#d62728",
         ))
-        fig2b.update_layout(
+        fig_b.update_layout(
             barmode="stack",
             title="Net Revenue vs Taxes — Top 15 Routes by Volume",
-            xaxis_tickangle=-45,
-            height=520,
-            yaxis_title="Amount ($)",
+            xaxis_tickangle=-45, height=520, yaxis_title="Amount ($)",
         )
-        st.plotly_chart(fig2b, use_container_width=True)
+        st.plotly_chart(fig_b, use_container_width=True)
 
-    # Key finding callout
-    worst_tax_row = tax_df.row(0, named=True)
+    worst = tax_df.row(0, named=True)
     st.info(
-        f"**Highest tax burden:** {worst_tax_row['route_label']} — "
-        f"{worst_tax_row['tax_pct']:.1f}% of gross revenue goes to taxes "
-        f"(${worst_tax_row['total_taxes']:,.0f} total across {worst_tax_row['ticket_count']:,} tickets)."
+        f"**Highest tax burden:** {worst['route_label']} — "
+        f"{worst['tax_pct']:.1f}% of gross revenue goes to taxes "
+        f"(${worst['total_taxes']:,.0f} across {worst['ticket_count']:,} tickets)."
     )
 
-# ── Q3: Fleet Efficiency ──────────────────────────────────────────────────────
 
-with tab3:
-    st.subheader("Q3 · Which aircraft model generates the most revenue per gallon of fuel?")
+# ═══════════════════════════════════════════════════════════════════════════════
+# Q3 — FLEET EFFICIENCY
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def render_q3(revenue_filtered: pl.DataFrame, kpis: dict) -> None:
+    st.title(f"{QUESTIONS['q3']['emoji']} {QUESTIONS['q3']['title']}")
+    st.subheader(QUESTIONS["q3"]["question"])
+    render_kpi_strip(kpis)
+    st.markdown("---")
+
     st.markdown(
         """
-        **Why this matters:** Fuel efficiency is the primary lever for reducing operating costs
-        without cutting capacity. Revenue per gallon captures both the aircraft's physical
-        efficiency and the revenue quality of the routes it typically flies. A model with low
-        rev/gallon is either physically inefficient or assigned to low-yield routes — either way,
-        it is a candidate for redeployment or phase-out.
+        **Why this matters:** Revenue per gallon captures both physical efficiency and
+        route yield quality. A model with low rev/gallon is a candidate for redeployment
+        or phase-out — even if it looks busy in the schedule.
 
-        **How to read this chart:** Bars represent aircraft models ranked by net revenue earned
-        per gallon of fuel burned. Hover for absolute fuel consumption and total flights operated.
+        **How to read this chart:** Bars ranked by net revenue per gallon of fuel.
+        Hover for absolute fuel consumption and total flights operated.
         """
     )
 
@@ -322,139 +365,114 @@ with tab3:
 
     if fleet_df.is_empty():
         st.warning("No fleet data available.")
-    else:
-        fig3 = px.bar(
-            fleet_df.to_pandas(),
-            x="model",
-            y="rev_per_gallon",
-            color="rev_per_gallon",
-            color_continuous_scale="Greens",
-            title="Net Revenue per Fuel Gallon by Aircraft Model",
-            labels={
-                "model": "Aircraft Model",
-                "rev_per_gallon": "Revenue / Gallon ($)",
-            },
-            hover_data={
-                "gallons": ":,.0f",
-                "fuel_cost": ":,.0f",
-                "net_revenue": ":,.0f",
-                "flights_operated": ":,",
-            },
+        return
+
+    fig = px.bar(
+        fleet_df.to_pandas(),
+        x="model", y="rev_per_gallon",
+        color="rev_per_gallon", color_continuous_scale="Greens",
+        title="Net Revenue per Fuel Gallon by Aircraft Model",
+        labels={"model": "Aircraft Model", "rev_per_gallon": "Revenue / Gallon ($)"},
+        hover_data={"gallons": ":,.0f", "fuel_cost": ":,.0f",
+                    "net_revenue": ":,.0f", "flights_operated": ":,"},
+    )
+    fig.update_layout(height=450, xaxis_tickangle=-30)
+    st.plotly_chart(fig, use_container_width=True)
+
+    best  = fleet_df.row(0,  named=True)
+    worst = fleet_df.row(-1, named=True)
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.success(
+            f"**Most efficient:** {best['model']} — "
+            f"${best['rev_per_gallon']:.2f}/gallon ({best['flights_operated']:,} flights)"
         )
-        fig3.update_layout(height=450, xaxis_tickangle=-30)
-        st.plotly_chart(fig3, use_container_width=True)
+    with col_r:
+        st.error(
+            f"**Least efficient:** {worst['model']} — "
+            f"${worst['rev_per_gallon']:.2f}/gallon ({worst['flights_operated']:,} flights)"
+        )
 
-        best_model = fleet_df.row(0, named=True)
-        worst_model = fleet_df.row(-1, named=True)
 
-        col_l, col_r = st.columns(2)
-        with col_l:
-            st.success(
-                f"**Most efficient:** {best_model['model']} — "
-                f"${best_model['rev_per_gallon']:.2f} revenue/gallon "
-                f"({best_model['flights_operated']:,} flights)"
-            )
-        with col_r:
-            st.error(
-                f"**Least efficient:** {worst_model['model']} — "
-                f"${worst_model['rev_per_gallon']:.2f} revenue/gallon "
-                f"({worst_model['flights_operated']:,} flights)"
-            )
+# ═══════════════════════════════════════════════════════════════════════════════
+# Q4 — MARGIN TREND
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# ── Q4: Margin Trend ──────────────────────────────────────────────────────────
+def render_q4(kpis: dict) -> None:
+    st.title(f"{QUESTIONS['q4']['emoji']} {QUESTIONS['q4']['title']}")
+    st.subheader(QUESTIONS["q4"]["question"])
+    render_kpi_strip(kpis)
+    st.markdown("---")
 
-with tab4:
-    st.subheader("Q4 · Is the overall margin improving over time?")
     st.markdown(
         """
-        **Why this matters:** A single margin snapshot can be misleading — what matters for
-        management is the trajectory. Is the gap between revenue and fuel cost widening
-        (efficiency gains, better pricing) or narrowing (rising costs, yield erosion)?
+        **Why this matters:** A single margin snapshot is misleading — what matters is
+        the trajectory. Is the gap between revenue and fuel cost widening or narrowing?
 
-        **Methodology note:** The fuel dataset does not carry a year dimension, so fleet-wide
-        fuel cost is allocated to each year proportionally by that year's share of total net
-        revenue. This means the margin % trend reflects revenue mix changes, not actual
-        year-by-year fuel price variation. A real improvement would use historical jet-A prices
-        per year.
+        **Methodology note:** Fuel data has no year dimension, so fleet-wide fuel cost is
+        allocated proportionally by each year's share of total net revenue. This means the
+        trend reflects revenue mix changes, not actual year-by-year fuel price variation.
 
-        **How to read these charts:** The top chart shows absolute net revenue vs estimated fuel
-        cost by year. The bottom chart shows the resulting margin percentage, with a red
-        break-even line at 0%.
+        **How to read these charts:** Top = absolute net revenue vs estimated fuel cost by year.
+        Bottom = resulting margin %, with a red break-even line at 0%.
         """
     )
 
-    trend_df = margin_trend(revenue_enriched, fuel)  # unfiltered revenue for full timeline
+    trend_df = margin_trend(revenue_enriched, fuel)  # always full history
 
-    fig4 = go.Figure()
-    fig4.add_trace(go.Scatter(
-        x=trend_df["yr"].to_list(),
-        y=trend_df["net_revenue"].to_list(),
-        name="Net Revenue",
-        mode="lines+markers",
+    fig_abs = go.Figure()
+    fig_abs.add_trace(go.Scatter(
+        x=trend_df["yr"].to_list(), y=trend_df["net_revenue"].to_list(),
+        name="Net Revenue", mode="lines+markers",
         line=dict(color="#1f77b4", width=2),
     ))
-    fig4.add_trace(go.Scatter(
-        x=trend_df["yr"].to_list(),
-        y=trend_df["est_fuel_cost"].to_list(),
-        name="Est. Fuel Cost",
-        mode="lines+markers",
+    fig_abs.add_trace(go.Scatter(
+        x=trend_df["yr"].to_list(), y=trend_df["est_fuel_cost"].to_list(),
+        name="Est. Fuel Cost", mode="lines+markers",
         line=dict(color="#d62728", width=2, dash="dot"),
     ))
-    fig4.update_layout(
+    fig_abs.update_layout(
         title="Net Revenue vs Estimated Fuel Cost — Full History",
-        xaxis_title="Year",
-        yaxis_title="Amount ($)",
-        height=420,
+        xaxis_title="Year", yaxis_title="Amount ($)", height=400,
         legend=dict(orientation="h", yanchor="bottom", y=1.02),
     )
-    st.plotly_chart(fig4, use_container_width=True)
+    st.plotly_chart(fig_abs, use_container_width=True)
 
-    fig4b = px.line(
-        trend_df.to_pandas(),
-        x="yr",
-        y="margin_pct",
+    fig_pct = px.line(
+        trend_df.to_pandas(), x="yr", y="margin_pct",
         title="Estimated Margin % by Year",
         labels={"yr": "Year", "margin_pct": "Margin (%)"},
         markers=True,
     )
-    fig4b.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
-    fig4b.update_layout(height=320)
-    st.plotly_chart(fig4b, use_container_width=True)
+    fig_pct.add_hline(y=0, line_dash="dash", line_color="red", annotation_text="Break-even")
+    fig_pct.update_layout(height=320)
+    st.plotly_chart(fig_pct, use_container_width=True)
 
-    # Year with highest / lowest margin
-    best_yr = trend_df.sort("margin_pct", descending=True).row(0, named=True)
+    best_yr  = trend_df.sort("margin_pct", descending=True).row(0,  named=True)
     worst_yr = trend_df.sort("margin_pct", descending=False).row(0, named=True)
-
     col_l, col_r = st.columns(2)
     with col_l:
-        st.success(
-            f"**Best year:** {best_yr['yr']} — {best_yr['margin_pct']:.1f}% margin"
-        )
+        st.success(f"**Best year:** {best_yr['yr']} — {best_yr['margin_pct']:.1f}% margin")
     with col_r:
-        st.warning(
-            f"**Weakest year:** {worst_yr['yr']} — {worst_yr['margin_pct']:.1f}% margin"
-        )
+        st.warning(f"**Weakest year:** {worst_yr['yr']} — {worst_yr['margin_pct']:.1f}% margin")
 
-# ── Data tab ──────────────────────────────────────────────────────────────────
 
-with tab5:
-    st.subheader("Filtered revenue table")
-    st.caption("Aggregated to route level for the current sidebar filter selection.")
+# ═══════════════════════════════════════════════════════════════════════════════
+# ROUTER
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    preview = (
-        revenue_filtered
-        .group_by("route_code", "origin", "destination", "origin_continent")
-        .agg(
-            pl.col("ticket_count").sum(),
-            pl.col("net_revenue").sum(),
-            pl.col("total_taxes").sum(),
-        )
-        .sort("net_revenue", descending=True)
-    )
-    st.dataframe(preview.to_pandas(), use_container_width=True)
-    st.download_button(
-        "Download as CSV",
-        data=preview.write_csv(),
-        file_name="ie_airlines_revenue_filtered.csv",
-        mime="text/csv",
-    )
+if current_page == "home":
+    render_home()
+else:
+    revenue_filtered, kpis = render_sidebar()
+
+    if current_page == "q1":
+        render_q1(revenue_filtered, kpis)
+    elif current_page == "q2":
+        render_q2(revenue_filtered, kpis)
+    elif current_page == "q3":
+        render_q3(revenue_filtered, kpis)
+    elif current_page == "q4":
+        render_q4(kpis)
+    else:
+        go_to("home")
